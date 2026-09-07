@@ -1,0 +1,16 @@
+# data "aws_vpc" "vpc_id" {
+#     filter {
+#         name = "tag:Name"
+#         value = ["std19-vpc"]
+#     }
+# }
+
+
+# data "리소스" "이름" {}
+data "aws_availability_zones" "available_az" {
+    state           = "available"
+}
+
+output "available_az" {
+    value = local.azs
+}

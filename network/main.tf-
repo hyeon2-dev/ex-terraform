@@ -1,0 +1,285 @@
+# terraform init: 테라폼 초기화
+# terraform plan: 테라폼을 통해 배포 가능한지 확인(--out=filename옵션을 통해 plan 파일 생성 가능)
+# terraform apply: 테라폼을 통해 배포(--auto-approve 옵션을 통해 자동 승인 가능)
+# terraform destroy: 테라폼을 통해 배포된 리소스 삭제(--auto-approve 옵션을 통해 자동 승인 가능)
+
+resource "aws_vpc" "std19_vpc" {
+    cidr_block              = var.vpc_cidr
+    instance_tenancy        = "default"
+    enable_dns_support      = true
+    enable_dns_hostnames    = true
+    tags                    = {
+        Name = "${local.tag_header}vpc"
+    }
+}
+
+# ================================================================
+# Public Subnet 생성
+# ================================================================
+resource "aws_subnet" "std19_public_subnet" {
+    # for_each                = toset(local.azs)
+    count                   = length(local.azs)
+    vpc_id                  = aws_vpc.std19_vpc.id
+    cidr_block              = var.subnet_cidr[0][count.index]
+    availability_zone       = local.azs[count.index]
+
+    # Public Subnet 설정에 사용
+    map_public_ip_on_launch = true
+    enable_resource_name_dns_a_record_on_launch = true
+
+
+    tags = {
+        Name = "${local.tag_header}public-${local.azs[count.index]}-subnet"
+    }
+}
+
+# ================================================================
+# Private Subnet 생성
+# ================================================================
+resource "aws_subnet" "std19_private_subnet" {
+    # for_each                = toset(local.azs)
+    count                   = length(local.azs)
+    vpc_id                  = aws_vpc.std19_vpc.id
+    cidr_block              = var.subnet_cidr[1][count.index]
+    availability_zone       = local.azs[count.index]
+
+    tags = {
+        Name = "${local.tag_header}private-${local.azs[count.index]}-subnet"
+    }
+}
+
+# ================================================================
+# Gateway 생성
+# ================================================================
+# Internet Gateway 생성
+resource "aws_internet_gateway" "std19_igw" {
+    vpc_id = aws_vpc.std19_vpc.id
+
+    tags = {
+        Name = "${local.tag_header}igw"
+    }
+}
+
+# NAT Gateway 생성을 위한 EIP 생성
+resource "aws_eip" "std19_nat_eip" {
+    domain = "vpc"  # VPC용 EIP 생성, std19_nat_eip의 사용범위를 VPC로 제한
+
+    tags = {
+        Name = "${local.tag_header}nat-eip"
+    }
+}
+
+# NAT Gateway 생성
+resource "aws_nat_gateway" "std19_nat_gw" {
+    allocation_id = aws_eip.std19_nat_eip.id
+    # NAT Gateway를 생성할 Public Subnet 지정
+    subnet_id     = aws_subnet.std19_public_subnet[0].id
+    # 인터넷 게이트웨이를 먼저 생성(완료)되면 이후 NAT Gateway를 생성하도록 의존성 설정
+    depends_on =   [
+        aws_internet_gateway.std19_igw
+    ]
+    tags = {
+        Name = "${local.tag_header}nat-gw"
+    }
+}
+
+# ================================================================
+# Route Table 생성
+# ================================================================
+# Public Route Table생성 -----------------------------------
+resource "aws_route_table" "std19_public_rt" {
+    vpc_id = aws_vpc.std19_vpc.id
+
+    tags = {
+        Name = "${local.tag_header}public-rt"
+    }
+}
+
+# 2. 서브넷 연결
+resource "aws_route_table_association" "std19_public_rt_assoc" {
+    for_each = {      # <- 문법사용
+        "us-west-2a" = aws_subnet.std19_public_subnet[0].id
+        "us-west-2b" = aws_subnet.std19_public_subnet[1].id
+        "us-west-2c" = aws_subnet.std19_public_subnet[2].id
+        "us-west-2d" = aws_subnet.std19_public_subnet[3].id
+    }
+    subnet_id           = each.value
+    route_table_id      = aws_route_table.std19_public_rt.id
+}
+# resource "aws_route_table_association" "std19_public2a_rt_assoc" {
+#     subnet_id           = aws_subnet.std19_public2a_subnet.id
+#     route_table_id      = aws_route_table.std19_public_rt.id
+# }
+
+# 3. 라우팅
+resource "aws_route" "std19_public_rt_route" {
+    route_table_id          = aws_route_table.std19_public_rt.id
+    destination_cidr_block  = "0.0.0.0/0"
+    gateway_id              = aws_internet_gateway.std19_igw.id
+}
+# -------------------------------------------------------------------------
+
+# Private Route Table생성 (2a, 2b, 2c, 2d)--------------------------------
+resource "aws_route_table" "std19_private_rt" {
+    count       = length(local.azs)
+    vpc_id = aws_vpc.std19_vpc.id
+
+    tags = {
+        Name = "${local.tag_header}private-${local.azs[count.index]}-rt"
+    }
+}
+
+# 2. 서브넷 연결
+resource "aws_route_table_association" "std19_private_rt_assoc" {
+    count   = length(local.azs)
+    subnet_id           = aws_subnet.std19_private_subnet[count.index].id
+    route_table_id      = aws_route_table.std19_private_rt[count.index].id
+}
+
+# 3. 라우팅
+resource "aws_route" "std19_private_rt_route" {
+    count   = length(local.azs)
+    route_table_id          = aws_route_table.std19_private_rt[count.index].id
+    destination_cidr_block  = "0.0.0.0/0"
+    nat_gateway_id          = aws_nat_gateway.std19_nat_gw.id
+}
+
+# =================================================================================
+# Security Group 생성
+# =================================================================================
+# SSH 접속용 Security Group 생성
+resource "aws_security_group" "std19_ssh_sg" {
+    name        = "${local.tag_header}ssh-sg"
+    description = "Security group for SSH access"
+    vpc_id      = aws_vpc.std19_vpc.id
+
+    ingress {
+        from_port   = 22
+        to_port     = 22
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}ssh-sg"
+    }
+}
+
+# MYSQL 접속용 Security Group 생성
+resource "aws_security_group" "std19_mysql_sg" {
+    name        = "${local.tag_header}mysql-sg"
+    description = "Security group for MYSQL access"
+    vpc_id      = aws_vpc.std19_vpc.id
+
+    ingress {
+        from_port   = 3306
+        to_port     = 3306
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}mysql-sg"
+    }
+}
+
+# 웹 보안그룹(ALB용) 생성
+resource "aws_security_group" "std19_external_alb_sg" {
+    name        = "${local.tag_header}external-alb-sg"
+    description = "Security group for web access"
+    vpc_id      = aws_vpc.std19_vpc.id
+
+    ingress {
+        from_port   = 80
+        to_port     = 80
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    ingress {
+        from_port   = 443
+        to_port     = 443
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}external-alb-sg"
+    }
+}
+
+# =================== 프라이빗 웹 인스턴스용 보안그룹 ===============================
+resource "aws_security_group" "std19_internal_alb_sg" {
+    name        = "${local.tag_header}internal-web-sg"
+    description = "Security group for private web access"
+    vpc_id      = aws_vpc.std19_vpc.id
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+    
+    tags = {
+        Name = "${local.tag_header}internal-alb-sg"
+    }
+}
+
+# 보안그룹 규칙 추가: 외부 ALB에서 내부 ALB로의 트래픽 허용
+resource "aws_security_group_rule" "std19_internal_alb_rule" {
+    type                        = "ingress"
+    from_port                   = 80
+    to_port                     = 80
+    protocol                    = "tcp"
+    # 규칙을 추가할 보안 그룹의 아이디
+    source_security_group_id    = aws_security_group.std19_external_alb_sg.id
+    # 소스로 어떤 보안 그룹을 추가할지 추가할 보안그룹의 아이디 지정
+    security_group_id           = aws_security_group.std19_internal_alb_sg.id  
+}
+
+# FastAPI 접속용 Security Group 생성
+resource "aws_security_group" "std19_fastapi_sg" {
+    name        = "${local.tag_header}fastapi-sg"
+    description = "Security group for fastapi access"
+    vpc_id      = aws_vpc.std19_vpc.id
+
+    ingress {
+        from_port   = 8000
+        to_port     = 8000
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}fastapi-sg"
+    }
+}
