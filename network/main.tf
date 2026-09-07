@@ -90,6 +90,12 @@ resource "aws_nat_gateway" "std19_nat_gw" {
 resource "aws_route_table" "std19_public_rt" {
     vpc_id = aws_vpc.std19_vpc.id
 
+    # 아래의 코드를 사용하면 3. 라우팅부분을 빼도 된다. 
+    route {
+        cidr_block = "0.0.0.0/0" 모든 목적지(인터넷)로 가는 트레픽은
+        gateway_id = aws_internet_gateway.std19_igw.id
+    }
+
     tags = {
         Name = "${local.tag_header}public-rt"
     }
@@ -203,19 +209,16 @@ resource "aws_security_group" "std19_external_alb_sg" {
     description = "Security group for web access"
     vpc_id      = aws_vpc.std19_vpc.id
 
-    ingress {
-        from_port   = 80
-        to_port     = 80
+    
+    dynamic "ingress" {
+        for_each = [80, 443]
+        content {
+        from_port   = ingress.value
+        to_port     = ingress.value
         protocol    = "tcp"
         cidr_blocks = ["0.0.0.0/0"]
-    }
-
-    ingress {
-        from_port   = 443
-        to_port     = 443
-        protocol    = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+        }
+    }    
 
     egress {
         from_port   = 0
@@ -282,4 +285,47 @@ resource "aws_security_group" "std19_fastapi_sg" {
     tags = {
         Name = "${local.tag_header}fastapi-sg"
     }
+}
+
+# ===========================================================================
+# NACL
+resource "aws_network_acl" "std19-nacl" {
+    vpc_id = aws_vpc.std19_vpc.id   # VPC-id
+
+    ingress {
+        rule_no     = 100   # rule_no는 ingress에서 중복되지 않게 작성
+        protocol    = "tcp"
+        action      = "allow"
+        cidr_block  = "0.0.0.0/0"
+        from_port   = 80
+        to_port     = 80
+    }
+
+    ingress {
+        rule_no     = 110   # rule_no는 ingress에서 중복되지 않게 작성
+        protocol    = "tcp"
+        action      = "allow"
+        cidr_block  = "0.0.0.0/0"
+        from_port   = 443
+        to_port     = 443
+    }
+
+    egress {
+        rule_no     = 100   # rule_no는 egress에서 중복되지 않게 작성
+        protocol    = "-1"
+        action      = "allow"
+        cidr_block  = "0.0.0.0/0"
+        from_port   = 0
+        to_port     = 0
+    }
+    
+    tags = {
+
+    }
+}
+
+# 서브넷 연결
+resource "aws_network_acl_association" "std19-nacl-assoc" {
+    subnet_id = aws_subnet.std19_public_subnet[0].id    # subnet-id
+    network_acl_id = aws_network_acl.std19_nacl.id      # network-acl-id
 }
