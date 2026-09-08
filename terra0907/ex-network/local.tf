@@ -6,4 +6,5 @@
 locals {
     tag_header  = "${var.default_name}-"
     azs         = data.aws_availability_zones.available_az.names
+    ami_id      = data.aws_ami.std19_ex_nginx_ami.id
 }

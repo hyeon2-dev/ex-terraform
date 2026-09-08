@@ -13,17 +13,20 @@ resource "aws_vpc" "std19_lab_vpc" {
 # Public Subnet 생성
 # ================================================================
 resource "aws_subnet" "std19_public_subnet" {
+    for_each                = toset(local.azs)
+    # count                   = length(local.azs)
     vpc_id                  = aws_vpc.std19_lab_vpc.id
-    cidr_block              = "10.0.1.0/24"
-    availability_zone       = "us-west-2a"
+    cidr_block              = var.subnet_cidr[0][each.key]
+    availability_zone       = each.key
 
     # Public Subnet 설정에 사용
+    # map_public_ip_on_launch = (var.subnet_type[0] == "public" ? true : false)
     map_public_ip_on_launch = true
     enable_resource_name_dns_a_record_on_launch = true
 
 
     tags = {
-        Name = "std19-public-subnet"
+        Name = "${local.tag_header}public-${split("-", each.key)[length(split("-", each.key))-1]}-subnet"
     }
 }
 
@@ -31,17 +34,16 @@ resource "aws_subnet" "std19_public_subnet" {
 # Private Subnet 생성
 # ================================================================
 resource "aws_subnet" "std19_private_subnet" {
+    for_each                = toset(local.azs)
+    # count                   = length(local.azs)
     vpc_id                  = aws_vpc.std19_lab_vpc.id
-    cidr_block              = "10.0.11.0/24"
-    availability_zone       = "us-west-2a"
-
-    enable_resource_name_dns_a_record_on_launch = true
+    cidr_block              = var.subnet_cidr[1][each.key]
+    availability_zone       = each.key
 
     tags = {
-        Name = "std19-private-subnet"
+        Name = "${local.tag_header}private-${each.key}-subnet"
     }
 }
-
 # ================================================================
 # Gateway 생성
 # ================================================================
@@ -67,7 +69,7 @@ resource "aws_eip" "std19_nat_eip" {
 resource "aws_nat_gateway" "std19_nat_gw" {
     allocation_id = aws_eip.std19_nat_eip.id
     # NAT Gateway를 생성할 Public Subnet 지정
-    subnet_id     = aws_subnet.std19_public_subnet.id
+    subnet_id     = aws_subnet.std19_public_subnet[local.azs[0]].id
     # 인터넷 게이트웨이를 먼저 생성(완료)되면 이후 NAT Gateway를 생성하도록 의존성 설정
     depends_on =   [
         aws_internet_gateway.std19_igw
@@ -97,16 +99,16 @@ resource "aws_route_table" "std19_public_rt" {
 
 # 2. 서브넷 연결
 resource "aws_route_table_association" "std19_public_rt_assoc" {
-    for_each = {      # <- 문법사용
-        "us-west-2a" = aws_subnet.std19_public_subnet.id
-    }
-    subnet_id           = each.value
+    for_each        = toset(local.azs)
+
+    subnet_id           = aws_subnet.std19_public_subnet[each.key].id
     route_table_id      = aws_route_table.std19_public_rt.id
 }
 # -------------------------------------------------------------------------
 
 # Private Route Table생성 (2a, 2b, 2c, 2d)--------------------------------
 resource "aws_route_table" "std19_private_rt" {
+    for_each    = toset(local.azs)
     vpc_id = aws_vpc.std19_lab_vpc.id
 
     tags = {
@@ -116,13 +118,15 @@ resource "aws_route_table" "std19_private_rt" {
 
 # 2. 서브넷 연결
 resource "aws_route_table_association" "std19_private_rt_assoc" {
-    subnet_id           = aws_subnet.std19_private_subnet.id
-    route_table_id      = aws_route_table.std19_private_rt.id
+    for_each    = toset(local.azs)
+    subnet_id           = aws_subnet.std19_private_subnet[each.key].id
+    route_table_id      = aws_route_table.std19_private_rt[each.key].id
 }
 
 # 3. 라우팅
 resource "aws_route" "std19_private_rt_route" {
-    route_table_id          = aws_route_table.std19_private_rt.id
+    for_each    = toset(local.azs)
+    route_table_id          = aws_route_table.std19_private_rt[each.key].id
     destination_cidr_block  = "0.0.0.0/0"
     nat_gateway_id          = aws_nat_gateway.std19_nat_gw.id
 }
@@ -152,6 +156,31 @@ resource "aws_security_group" "std19_ssh_sg" {
 
     tags = {
         Name = "${local.tag_header}ssh-sg"
+    }
+}
+
+# MYSQL 접속용 Security Group 생성
+resource "aws_security_group" "std19_mysql_sg" {
+    name        = "${local.tag_header}mysql-sg"
+    description = "Security group for MYSQL access"
+    vpc_id      = aws_vpc.std19_lab_vpc.id
+
+    ingress {
+        from_port   = 3306
+        to_port     = 3306
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}mysql-sg"
     }
 }
 
@@ -242,6 +271,6 @@ resource "aws_network_acl" "std19_nacl" {
 
 # 서브넷 연결
 resource "aws_network_acl_association" "std19-nacl-assoc" {
-    subnet_id = aws_subnet.std19_public_subnet.id    # subnet-id
+    subnet_id = aws_subnet.std19_public_subnet[local.azs[0]].id    # subnet-id
     network_acl_id = aws_network_acl.std19_nacl.id      # network-acl-id
 }
