@@ -25,11 +25,11 @@ terraform {
 
     # 협업을 위한 상태 값 공유 저장소 설정
     # backend "s3" {
-        # bucket          = "bipa17-student-bucket"                             # 위에서 만든
-        # key             = "TerraformState/Lab/create-vpc/terraform.tfstate"   # 버킷 내 저장
+        # bucket          = "bipa17-student-bucket"                             # 위에서 만든 S3 버킷 이름
+        # key             = "TerraformState/Lab/create-vpc/terraform.tfstate"   # 버킷 내 저장 경로
         # region          = "us-west-2"                                         # 리전
-        # dynamodb_table  = "std19-terraform-lock-table"                        # 
-        # encrypt         = true                                                #
+        # dynamodb_table  = "std19-terraform-lock-table"                        # DynamoDB 테이블 이름
+        # encrypt         = true                                                
 
     # }
 

@@ -19,18 +19,18 @@ data "aws_subnets" "subnet_ids" {
     }
 }
 
-resource "aws_db_subnet_group" "std19_db_subnet_group" {
-    name        = "std19-db-subnet-group"
-    # subnet_ids = [
-    #     aws_subnet.std19_private_subnet[local.azs[0]].id,
-    #     aws_subnet.std19_private_subnet[local.azs[1]].id,
-    #     aws_subnet.std19_private_subnet[local.azs[2]].id,
-    #     aws_subnet.std19_private_subnet[local.azs[3]].id
-    # ]
-    subnet_ids = data.aws_subnets.subnet_ids.ids
+# resource "aws_db_subnet_group" "std19_db_subnet_group" {
+#     name        = "std19-db-subnet-group"
+#     # subnet_ids = [
+#     #     aws_subnet.std19_private_subnet[local.azs[0]].id,
+#     #     aws_subnet.std19_private_subnet[local.azs[1]].id,
+#     #     aws_subnet.std19_private_subnet[local.azs[2]].id,
+#     #     aws_subnet.std19_private_subnet[local.azs[3]].id
+#     # ]
+#     subnet_ids = values(aws_subnet.std19_private_subnet)[*].id
 
-    tags = { Name = "std19-db-subnet-group"}
-}
+#     tags = { Name = "std19-db-subnet-group"}
+# }
 
 # output "choice_subnets" {
 #     value = data.aws_subnets.subnet_ids.ids
@@ -46,9 +46,10 @@ resource "aws_db_instance" "std19_mysql_instance" {
     instance_class      = "db.t3.micro" # 연습용, 실제 환경에서 사용x
     allocated_storage   = 20 # 최소사양
 
+    # secrets-manager.tf
     db_name             = "testdb"
-    username            = "std19"
-    password            = "asdf1234!"
+    username            = jsondecode(aws_secretsmanager_secret_version.mysql_password.secret_string)["username"]
+    password            = jsondecode(aws_secretsmanager_secret_version.mysql_password.secret_string)["password"]
     
     db_subnet_group_name    = aws_db_subnet_group.std19_db_subnet_group.name
     availability_zone       = local.azs[1]

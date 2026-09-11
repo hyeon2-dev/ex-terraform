@@ -1,0 +1,10 @@
+{
+    "Item": {
+        "LockID": {
+            "S": "std19-ex-terraform-state-bucket/TerraformState/Lab/ex-network/terraform.tfstate-md5"
+        },
+        "Digest": {
+            "S": "869f6a81bd28c86c2b494a47acb67099"
+        }
+    }
+}

@@ -27,6 +27,8 @@ resource "aws_subnet" "std19_public_subnet" {
 
     tags = {
         Name = "${local.tag_header}public-${split("-", each.key)[length(split("-", each.key))-1]}-subnet"
+        "kubernetes.io/cluster/${local.tag_header}eks-cluster" = "shared"
+        "kubernetes.io/role/elb" = "1"   
     }
 }
 
@@ -42,6 +44,8 @@ resource "aws_subnet" "std19_private_subnet" {
 
     tags = {
         Name = "${local.tag_header}private-${each.key}-subnet"
+        "kubernetes.io/cluster/${local.tag_header}eks-cluster" = "shared"
+        "kubernetes.io/role/internal-elb" = "1"
     }
 }
 # ================================================================
@@ -212,6 +216,37 @@ resource "aws_security_group" "std19_external_alb_sg" {
         Name = "${local.tag_header}external-alb-sg"
     }
 }
+
+# =================== 프라이빗 웹 인스턴스용 보안그룹 ===============================
+resource "aws_security_group" "std19_internal_alb_sg" {
+    name        = "${local.tag_header}internal-web-sg"
+    description = "Security group for private web access"
+    vpc_id      = aws_vpc.std19_lab_vpc.id
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+    
+    tags = {
+        Name = "${local.tag_header}internal-alb-sg"
+    }
+}
+
+# 보안그룹 규칙 추가: 외부 ALB에서 내부 ALB로의 트래픽 허용
+resource "aws_security_group_rule" "std19_internal_alb_rule" {
+    type                        = "ingress"
+    from_port                   = 80
+    to_port                     = 80
+    protocol                    = "tcp"
+    # 규칙을 추가할 보안 그룹의 아이디
+    source_security_group_id    = aws_security_group.std19_external_alb_sg.id
+    # 소스로 어떤 보안 그룹을 추가할지 추가할 보안그룹의 아이디 지정
+    security_group_id           = aws_security_group.std19_internal_alb_sg.id  
+}
+
 
 # ===========================================================================
 # NACL

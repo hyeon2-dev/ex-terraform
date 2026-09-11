@@ -1,0 +1,278 @@
+# ====================================================================================
+# Lambda Function 에서 사용할 보안 그룹
+# ====================================================================================
+resource "aws_security_group" "std19_lambda_sg" {
+    name        = "${local.tag_header}lambda-sg"
+    description = "Security group for Lambda Function access"
+    vpc_id      = aws_vpc.std19_lab_vpc.id
+
+    egress {
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"  # 모든 프로토콜 허용
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
+    tags = {
+        Name = "${local.tag_header}lambda-sg"
+    }
+}
+
+# ====================================================================================
+# 보안 암호 생성(형식이 있음)
+# 아래는 보안 암호 삭제를 위한 AWS CLI
+# aws secretsmanager delete-secret \
+#   --secret-id "project/mysql/password" \
+#   --force-delete-without-recovery
+# ====================================================================================
+# 1. 시크릿 이름 정의
+resource "aws_secretsmanager_secret" "mysql_secrets_manager" {
+    description = "RDS 데이터베이스 비밀번호"
+    name        = "project/mysql/password"
+}
+
+#2. JSON 형식으로 보안암호 지정
+resource "aws_secretsmanager_secret_version" "mysql_password" {
+    secret_id       = aws_secretsmanager_secret.mysql_secrets_manager.id
+    # 반드시!! 아래의 JSON 형식(key명 포함)을 유지할것 
+    secret_string   = jsonencode ({
+        engine      = "mysql"
+        host        = aws_rds_cluster.mysql_cluster.endpoint    # DB 생성 완료 후 엔드포인트가 자동 주입됨
+        port        = 3306
+        username    = "std19"
+        password    = random_password.random_password.result
+    })
+}
+
+# 3. 16자리 랜덤 문자열 생성: 아래 override_special은 AWS에서 권장하는 방식
+resource "random_password" "random_password" {
+    length              = 16
+    special             = true
+    override_special    = "!#$%&*()-_=+[]{}<>:?"
+}
+
+
+
+# ====================================================================================
+# RDS Secrets Manager Automatic Rotation (00일 주기 자동 변경) - CloudFormation 이용
+# ====================================================================================
+# 1. CloudFormation의 스택을 배폭하는 리소스 생성
+resource "aws_serverlessapplicationrepository_cloudformation_stack" "mysql_rotation" {
+    # CloudFormation의 스택 이름
+    name        = "rds-mysql-cluster-rotation-stack"
+    # 비밀번호 변경에 사용할 원본(기준) 함수(애플리케이션)의 ARN(us-east-1로 arn값 고정)
+    application_id = "arn:aws:serverlessrepo:us-east-1:297356227824:applications/SecretsManagerRDSMySQLRotationSingleUser"
+
+    # CloudFormation이 IAM 생성 및 리소스 정책을 정의할 수 잇도록 승인하는 권한 설정
+    capabilities    = ["CAPABILITY_IAM","CAPABILITY_RESOURCE_POLICY"]
+
+    # Lambda 함수 동작에 필요한 설정(Parameter)
+    parameters  = {
+        # 람다함수의 이름
+        functionName    = "${local.tag_header}rds-mysql-cluster-rotation-fn"
+
+        # 보안 암호(Secrets Manager)의 Endpoint 정의
+        endpoint        = "https://secretsmanager.${local.region}.amazonaws.com"
+
+        # Lambda 함수가 접속해야할 데이터베이스가 포함된 서브넷 ID 정의
+        vpcSubnetIds    = join(",", [
+            aws_subnet.std19_private_subnet[local.azs[0]].id,
+            aws_subnet.std19_private_subnet[local.azs[1]].id,
+            aws_subnet.std19_private_subnet[local.azs[2]].id,
+            aws_subnet.std19_private_subnet[local.azs[3]].id
+        ])
+        # Lambda 함수에 적용할 보안 그룹(Security Group) ID
+        vpcSecurityGroupIds = aws_security_group.std19_lambda_sg.id
+    }
+}
+
+# Secrets Manager에 저장된 암호를 지정된 주기 및 람다 함수를 연결하는 리소스 생성
+resource "aws_secretsmanager_secret_rotation" "mysql_secret_rotation" {
+    # 바꿀 대상(보안 암호) 지정
+    secret_id   = aws_secretsmanager_secret.mysql_secrets_manager.id
+
+    # 사용할 람다함수 정의
+    rotation_lambda_arn = aws_serverlessapplicationrepository_cloudformation_stack.mysql_rotation.outputs.RotationLambdaARN
+
+    # 규칙 정의
+    rotation_rules {
+        automatically_after_days = 30
+    }
+}
+
+# ====================================================================================
+# RDS Cluster 구성
+# ====================================================================================
+# 1. Subnet Group 생성
+resource "aws_db_subnet_group" "std19_db_subnet_group" {
+    name        = "std19-db-subnet-group"
+    subnet_ids = [
+        aws_subnet.std19_private_subnet[local.azs[0]].id,
+        aws_subnet.std19_private_subnet[local.azs[1]].id,
+        aws_subnet.std19_private_subnet[local.azs[2]].id,
+        aws_subnet.std19_private_subnet[local.azs[3]].id
+    ]
+    
+    tags = { Name = "std19-db-subnet-group"}
+}
+
+# 2. MySQL Cluster 생성: RDS MySQL Multi-AZ DB Cluster
+# 주의 1: Engine의 버전은 반드시 Cluster 구성에 사용할 수 있는 버전으로 지정해야 함.
+# 볼륨 Type(gp3/io1)
+# 볼륨 타입을 gp3를 사용할 경우 400GiB이하의 경우 iops를 주석처리
+# 수정(업데이트)의 경우 변경하지 못하게 lifecycle 설정 필요(변경 설정 무시)
+resource "aws_rds_cluster" "mysql_cluster" {
+    # cluster 이름
+    cluster_identifier  = "rds-mysql-multi-az-cluster"
+
+    engine          = "mysql"
+    engine_version  = "8.0.46"
+
+    db_cluster_instance_class = "db.m5d.large"  # region에 따라 다르니 콘솔에서 확인
+
+    # 볼륨 설정: type(gp3/io1)
+    storage_type        = "gp3"
+    allocated_storage   = 100
+    # iops              = 3000
+    # throughput        = 125
+
+    database_name       = "testdb"
+    master_username     = "std19"
+    master_password     = random_password.random_password.result
+
+    db_subnet_group_name    = aws_db_subnet_group.std19_db_subnet_group.name
+    vpc_security_group_ids  = [ aws_security_group.std19_mysql_sg.id ]
+    skip_final_snapshot     = true  # 연습이니까 true(종료할때 스킵), 운영시 false(스냅샷 만들고 종료)
+
+    # 수정할 때 볼륨으로 인한 에러 발생
+    # 이에 최초 생성 이외 apply때 볼륨 변경을 무시하기 위한 설정
+    lifecycle {
+        ignore_changes = [
+            storage_type,
+            allocated_storage,
+            iops
+        ]
+    }
+
+    tags = { Name = "rds-mysql-multi-az-cluster" }
+}
+
+# =====================================================================================
+# 1. RDS Proxy IAM Role & Policy
+resource "aws_iam_role" "proxy_role" {
+    name = "${local.tag_header}rds-proxy-secrets-role"
+
+    assume_role_policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [{
+            Action = "sts:AssumeRole"
+            Effect = "Allow"
+            Principal = {
+                Service = "rds.amazonaws.com"
+            }
+        }]
+    })
+
+    tags = { Name = "${local.tag_header}rds-proxy-secrets-role"}
+}
+
+# Role 구성을 위한 정책 생성
+resource "aws_iam_role_policy" "proxy_policy" {
+    name = "${local.tag_header}rds-proxy-secrets-policy"
+    role = aws_iam_role.proxy_role.id
+
+    policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [{
+            Effect = "Allow"
+            Action = [
+                "secretsmanager:GetSecretValue"
+            ]
+            Resource = [ aws_secretsmanager_secret.mysql_secrets_manager.arn]
+        }]
+    })
+    # 태그 지원 x
+}
+
+# =====================================================================================
+# 2. RDS Proxy Target Group 연결 (DB Cluster 연결)
+resource "aws_db_proxy" "proxy" {
+    name            = "${local.tag_header}rds-mysql-cluster-proxy"
+
+    # 엔진(DB 종류)
+    engine_family   = "MYSQL"
+
+    # 클라이언트에서 프록시와의 연결 이후 특정 행위가 없더라도 연결을 유지해주는 시간
+    # 아래 설정은 30분동안 클라이언트와 상호간 트래픽이 발생하지 않을 경우 연결 종료
+    idle_client_timeout     = 1800
+
+    # 상시 적용: 클라이언트와 프록시간의 데이터 암호화
+    require_tls             = true
+
+    # 사용할 서브넷 설정 목록
+    vpc_subnet_ids          = [
+        aws_subnet.std19_private_subnet[local.azs[0]].id,
+        aws_subnet.std19_private_subnet[local.azs[1]].id,
+        aws_subnet.std19_private_subnet[local.azs[2]].id,
+        aws_subnet.std19_private_subnet[local.azs[3]].id
+    ]
+
+    # Secrets Manager 사용 권한 설정
+    role_arn                = aws_iam_role.proxy_role.arn
+
+    # 보안 그룹 설정
+    vpc_security_group_ids  = [ aws_security_group.std19_mysql_sg.id ]
+
+    # 인증 설정부
+    auth {
+        # description   = "인증 방식에 대한 설명"
+        # 사용자가 프록시에 어떤 방식으로 로그인할지 정의
+        # REQUIRED: IAM 토큰을 이용하여 로그인
+        # DISABLED: 일반 DB 계정 / 보안 암호를 이용한 인증 사용
+        iam_auth    = "DISABLED"
+
+        # 데이터베이스로의 로그인하는 방식은 고정
+        # SECRETS: Secrets Manager 사용한 로그인 방식 사용
+        auth_scheme = "SECRETS"
+
+        # 사용할 Secrets Manager 설정(ARN)
+        secret_arn  = aws_secretsmanager_secret.mysql_secrets_manager.arn
+    }
+
+    tags = { Name = "${local.tag_header}-rds-mysql-cluster-proxy" }
+
+}
+
+# =====================================================================================
+# 3. Proxy의 기본 타겟 그룹 생성 및 연결
+resource "aws_db_proxy_default_target_group" "proxy_target_group" {
+    db_proxy_name   = aws_db_proxy.proxy.name
+
+    # 접속자들 관리 환경 정의
+    connection_pool_config {
+        # 로그인 유지 시간(초)
+        connection_borrow_timeout   = 300
+
+        # 최대 연결 수
+        # 데이터베이스의 최대 연결 허용치에 대한 비율을 정의
+        max_connections_percent     = 100
+
+        # 최대 연결(max_connections_percent) 수 중 idle 상태의 연결을 유지시킬 비율
+        max_idle_connections_percent    = 50
+    }
+}
+
+
+
+# =====================================================================================
+# 4. RDS Proxy와 실제 백엔드 데이터베이스(Aurora Cluster)를 상호 연결
+resource "aws_db_proxy_target" "proxy_target_cluster" {
+    # proxy와의 연결 구성
+    db_proxy_name       = aws_db_proxy.proxy.name
+    
+    # proxy_target_group과의 연결 구성
+    target_group_name   = aws_db_proxy_default_target_group.proxy_target_group.name
+
+    # Database와의 연결 구성
+    db_cluster_identifier   = aws_rds_cluster.mysql_cluster.id
+}
